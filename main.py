@@ -4,14 +4,15 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# In-memory storage for tabs, messages, slow mode, and online presence
+# Permanent in-memory storage for tabs and messages
 tabs = {"global": {"name": "global", "display": "Global Lobby"}}
 messages = {"global": []}
 last_message_times = {}  # Tracks user slow mode cooldowns
-active_users = {}  # Tracks online presence (username -> timestamp)
+active_users = {}  # Tracks online presence
 
 MESSAGE_LIMIT = 200
 SLOW_MODE_COOLDOWN = 5.0  # 5 seconds cooldown
+MAX_SAVED_MESSAGES = 100  # Keeps the last 100 messages saved per tab
 
 
 @app.route("/", methods=["GET"])
@@ -22,10 +23,9 @@ def home():
 # Get all chat tabs & online count
 @app.route("/tabs", methods=["GET"])
 def get_tabs():
-  # Clean up users inactive for more than 15 seconds
   current_time = time.time()
   inactive_users = [
-      u for u, t in active_users.items() if current_time - t > 15
+      u for u, t in active_users.items() if current_time - t > 20
   ]
   for u in inactive_users:
     del active_users[u]
@@ -51,7 +51,8 @@ def create_tab():
     return jsonify({"error": "Invalid or existing tab name."}), 400
 
   tabs[tab_name] = {"name": tab_name, "display": display_name}
-  messages[tab_name] = []
+  if tab_name not in messages:
+    messages[tab_name] = []
   return jsonify({"success": True, "tab": tabs[tab_name]})
 
 
@@ -75,7 +76,7 @@ def delete_tab(tab_name):
   return jsonify({"error": "Tab not found."}), 404
 
 
-# Get messages for a specific tab & record player online presence
+# Get messages (Returns full history on join, or new messages after 'after')
 @app.route("/messages", methods=["GET"])
 def get_messages():
   username = request.args.get("username", "")
@@ -89,22 +90,23 @@ def get_messages():
   tab_messages = messages[tab]
   after_id = request.args.get("after")
 
-  if after_id:
-    filtered = []
-    found = False
-    for m in tab_messages:
-      if found:
-        filtered.append(m)
-      if str(m.get("id")) == str(after_id):
-        found = True
-    if not found and not tab_messages:
-      filtered = tab_messages
-    return jsonify({"messages": filtered})
+  # If no 'after' ID is provided (e.g. when first joining or switching tabs),
+  # send all saved messages so history isn't lost!
+  if not after_id:
+    return jsonify({"messages": tab_messages})
 
-  return jsonify({"messages": tab_messages})
+  filtered = []
+  found = False
+  for m in tab_messages:
+    if found:
+      filtered.append(m)
+    if str(m.get("id")) == str(after_id):
+      found = True
+
+  return jsonify({"messages": filtered})
 
 
-# Post a message
+# Post a message & save it permanently in history
 @app.route("/messages", methods=["POST"])
 def post_message():
   data = request.json or {}
@@ -116,14 +118,11 @@ def post_message():
   if not msg_text:
     return jsonify({"error": "Message cannot be empty."}), 400
 
-  # Record user online presence
   active_users[username] = time.time()
 
-  # Character limit: 200 max
   if len(msg_text) > MESSAGE_LIMIT:
     msg_text = msg_text[:MESSAGE_LIMIT]
 
-  # Slow mode: 5-second cooldown per user
   current_time = time.time()
   if username in last_message_times:
     elapsed = current_time - last_message_times[username]
@@ -153,7 +152,9 @@ def post_message():
   }
 
   messages[tab].append(new_msg)
-  if len(messages[tab]) > 150:
+
+  # Keep up to MAX_SAVED_MESSAGES saved in memory so it doesn't overflow
+  if len(messages[tab]) > MAX_SAVED_MESSAGES:
     messages[tab].pop(0)
 
   return jsonify({"success": True, "message": new_msg})
