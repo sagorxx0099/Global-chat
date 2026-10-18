@@ -1,155 +1,146 @@
-
-import os
 import time
-import threading
-from collections import deque
+from flask import Flask, jsonify, request
 
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
+app = Flask(__name__)
 
-app = FastAPI(title="Global Community Chat")
+# In-memory storage for tabs, messages, and slow mode cooldowns
+tabs = {"global": {"name": "global", "display": "Global Lobby"}}
+messages = {"global": []}
+last_message_times = {}  # Tracks user slow mode cooldowns (username -> timestamp)
 
-API_KEY = os.environ.get("CHAT_API_KEY", "")
-OWNER_USER_ID = int(os.environ.get("OWNER_USER_ID", "0"))
-
-lock = threading.Lock()
-messages = deque(maxlen=200)
-channels = [{"id": "global", "name": "GLOBAL CHAT"}]
-next_message_id = 1
+MESSAGE_LIMIT = 200
+SLOW_MODE_COOLDOWN = 5.0  # 5 seconds cooldown
 
 
-class MessageInput(BaseModel):
-    user_id: int
-    display_name: str = Field(min_length=1, max_length=50)
-    text: str = Field(min_length=1, max_length=300)
-    channel_id: str = "global"
-
-
-class ChannelInput(BaseModel):
-    name: str = Field(min_length=1, max_length=30)
-
-
-def check_key(key):
-    if not API_KEY or key != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-def check_owner(user_id):
-    if not OWNER_USER_ID or user_id != OWNER_USER_ID:
-        raise HTTPException(status_code=403, detail="Owner only")
-
-
-@app.get("/")
+@app.route("/", methods=["GET"])
 def home():
-    return {"status": "online", "service": "Global Community Chat"}
+  return jsonify({"status": "Server is running!"})
 
 
-@app.get("/health")
-def health():
-    return {"ok": True}
+# Get all chat tabs
+@app.route("/tabs", methods=["GET"])
+def get_tabs():
+  tab_list = list(tabs.values())
+  return jsonify({"tabs": tab_list})
 
 
-@app.get("/channels")
-def get_channels(x_chat_key: str = Header(default="")):
-    check_key(x_chat_key)
-    with lock:
-        return {"channels": list(channels)}
+# Create a new tab (Owner only: username must be "the_sagor")
+@app.route("/tabs", methods=["POST"])
+def create_tab():
+  data = request.json or {}
+  username = data.get("username", "")
+  tab_name = data.get("tabName", "").strip().lower()
+  display_name = data.get("displayName", tab_name)
+
+  if username != "the_sagor":
+    return jsonify({"error": "Unauthorized. Owner only."}), 403
+
+  if not tab_name or tab_name in tabs:
+    return jsonify({"error": "Invalid or existing tab name."}), 400
+
+  tabs[tab_name] = {"name": tab_name, "display": display_name}
+  messages[tab_name] = []
+  return jsonify({"success": True, "tab": tabs[tab_name]})
 
 
-@app.get("/messages")
-def get_messages(
-    after: int = 0,
-    channel_id: str = "global",
-    x_chat_key: str = Header(default="")
-):
-    check_key(x_chat_key)
-    with lock:
-        result = [
-            dict(m) for m in messages
-            if m["id"] > after
-            and m["channel_id"] == channel_id
-        ]
-    return {"messages": result}
+# Delete a tab (Owner only: username must be "the_sagor")
+@app.route("/tabs/<tab_name>", methods=["DELETE"])
+def delete_tab(tab_name):
+  username = request.args.get("username", "")
+
+  if username != "the_sagor":
+    return jsonify({"error": "Unauthorized. Owner only."}), 403
+
+  if tab_name == "global":
+    return jsonify({"error": "Cannot delete the default global tab."}), 400
+
+  if tab_name in tabs:
+    del tabs[tab_name]
+    if tab_name in messages:
+      del messages[tab_name]
+    return jsonify({"success": True})
+
+  return jsonify({"error": "Tab not found."}), 404
 
 
-@app.post("/messages")
-def send_message(
-    data: MessageInput,
-    x_chat_key: str = Header(default="")
-):
-    global next_message_id
-    check_key(x_chat_key)
+# Get messages for a specific tab
+@app.route("/messages", methods=["GET"])
+def get_messages():
+  tab = request.args.get("tab", "global")
+  if tab not in messages:
+    messages[tab] = []
 
-    text = data.text.strip()
-    display_name = data.display_name.strip()
+  tab_messages = messages[tab]
+  after_id = request.args.get("after")
 
-    if not text or not display_name:
-        raise HTTPException(status_code=400, detail="Empty message")
+  if after_id:
+    filtered = []
+    found = False
+    for m in tab_messages:
+      if found:
+        filtered.append(m)
+      if str(m.get("id")) == str(after_id):
+        found = True
+    if not found and not tab_messages:
+      filtered = tab_messages
+    return jsonify({"messages": filtered})
 
-    with lock:
-        if not any(c["id"] == data.channel_id for c in channels):
-            raise HTTPException(status_code=404, detail="Channel not found")
-
-        item = {
-            "id": next_message_id,
-            "user_id": data.user_id,
-            "display_name": display_name,
-            "text": text,
-            "channel_id": data.channel_id,
-            "is_owner": data.user_id == OWNER_USER_ID,
-            "time": int(time.time())
-        }
-        next_message_id += 1
-        messages.append(item)
-
-    return {"message": item}
+  return jsonify({"messages": tab_messages})
 
 
-@app.post("/channels")
-def create_channel(
-    data: ChannelInput,
-    x_chat_key: str = Header(default=""),
-    x_owner_id: int = Header(default=0)
-):
-    check_key(x_chat_key)
-    check_owner(x_owner_id)
+# Post a message (Enforces character limit, slow mode, owner tag, and display names)
+@app.route("/messages", methods=["POST"])
+def post_message():
+  data = request.json or {}
+  tab = data.get("tab", "global")
+  username = data.get("username", "Unknown")  # Real username for owner check
+  display_name = data.get("displayName", username)  # Roblox Display Name
+  msg_text = data.get("message", "").strip()
 
-    name = data.name.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Name required")
+  if not msg_text:
+    return jsonify({"error": "Message cannot be empty."}), 400
 
-    with lock:
-        if any(c["name"].casefold() == name.casefold() for c in channels):
-            raise HTTPException(status_code=409, detail="Channel exists")
+  # 6. Character limit: 200 characters maximum
+  if len(msg_text) > MESSAGE_LIMIT:
+    msg_text = msg_text[:MESSAGE_LIMIT]
 
-        channel = {
-            "id": "channel-" + str(int(time.time() * 1000)),
-            "name": name.upper()
-        }
-        channels.append(channel)
+  # 7. Slow mode: 5-second cooldown per user
+  current_time = time.time()
+  if username in last_message_times:
+    elapsed = current_time - last_message_times[username]
+    if elapsed < SLOW_MODE_COOLDOWN:
+      remaining = round(SLOW_MODE_COOLDOWN - elapsed, 1)
+      return (
+          jsonify({
+              "error": f"Slow mode enabled. Please wait {remaining}s."
+          }),
+          429,
+      )
 
-    return {"channel": channel}
+  last_message_times[username] = current_time
+
+  if tab not in messages:
+    messages[tab] = []
+
+  # 2. Owner tag detection for username "the_sagor"
+  is_owner = username.lower() == "the_sagor"
+
+  new_msg = {
+      "id": str(time.time() * 1000),
+      "username": display_name,  # 3. Show Roblox display name
+      "rawUsername": username,
+      "message": msg_text,
+      "isOwner": is_owner,  # 2. Owner tag flag
+      "timestamp": int(time.time()),
+  }
+
+  messages[tab].append(new_msg)
+  if len(messages[tab]) > 150:
+    messages[tab].pop(0)
+
+  return jsonify({"success": True, "message": new_msg})
 
 
-@app.delete("/channels/{channel_id}")
-def delete_channel(
-    channel_id: str,
-    x_chat_key: str = Header(default=""),
-    x_owner_id: int = Header(default=0)
-):
-    check_key(x_chat_key)
-    check_owner(x_owner_id)
-
-    if channel_id == "global":
-        raise HTTPException(status_code=400, detail="Cannot delete default channel")
-
-    with lock:
-        global channels
-        if not any(c["id"] == channel_id for c in channels):
-            raise HTTPException(status_code=404, detail="Channel not found")
-        channels = [c for c in channels if c["id"] != channel_id]
-        remaining = [m for m in messages if m["channel_id"] != channel_id]
-        messages.clear()
-        messages.extend(remaining)
-
-    return {"ok": True}
+if __name__ == "__main__":
+  app.run(host="0.0.0.0", port=5000)
+      
