@@ -1,59 +1,62 @@
-import json
 import os
 import time
+import requests
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-DATA_FILE = "chat_data.json"
-
-# Default data structure
-default_data = {
-    "tabs": {"global": {"name": "global", "display": "Global Lobby"}},
-    "messages": {"global": []},
+# Your JSONBin details
+BIN_ID = "6ad5e140ac6210605a3e42e3"
+MASTER_KEY = "$2a$10$UCtiBKkVUgl0HFVAffaIG.hnfbL0FDEPi.nRcfJbPbGIs2smtPOXy"
+JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{BIN_ID}"
+HEADERS = {
+    "Content-Type": "application/json",
+    "X-Master-Key": MASTER_KEY,
 }
 
 
-# Load data from disk if it exists
-def load_data():
-  if os.path.exists(DATA_FILE):
-    try:
-      with open(DATA_FILE, "r") as f:
-        return json.load(f)
-    except Exception:
-      pass
-  return default_data
-
-
-# Save data to disk
-def save_data(data):
+def load_cloud_data():
   try:
-    with open(DATA_FILE, "w") as f:
-      json.dump(data, f)
+    res = requests.get(JSONBIN_URL, headers=HEADERS)
+    if res.status_code == 200:
+      data = res.json().get("record", {})
+      return data.get(
+          "tabs", {"global": {"name": "global", "display": "Global Lobby"}}
+      ), data.get("messages", {"global": []})
+  except Exception:
+    pass
+  return {"global": {"name": "global", "display": "Global Lobby"}}, {
+      "global": []
+  }
+
+
+def save_cloud_data(tabs_data, messages_data):
+  try:
+    payload = {"tabs": tabs_data, "messages": messages_data}
+    requests.put(JSONBIN_URL, headers=HEADERS, json=payload)
   except Exception:
     pass
 
 
-db = load_data()
-tabs = db.get("tabs", default_data["tabs"])
-messages = db.get("messages", default_data["messages"])
-
-last_message_times = {}  # Tracks user slow mode cooldowns
-active_users = {}  # Tracks online presence
+tabs, messages = load_cloud_data()
+last_message_times = {}
+active_users = {}
 
 MESSAGE_LIMIT = 200
-SLOW_MODE_COOLDOWN = 5.0  # 5 seconds cooldown
-MAX_SAVED_MESSAGES = 100  # Keeps the last 100 messages saved per tab
+SLOW_MODE_COOLDOWN = 5.0
+MAX_SAVED_MESSAGES = 100
 
 
 @app.route("/", methods=["GET"])
 def home():
-  return jsonify({"status": "Server is running!"})
+  return jsonify({"status": "Server is running with cloud storage!"})
 
 
-# Get all chat tabs & online count
 @app.route("/tabs", methods=["GET"])
 def get_tabs():
+  global tabs, messages
+  tabs, messages = load_cloud_data()
+
   current_time = time.time()
   inactive_users = [
       u for u, t in active_users.items() if current_time - t > 20
@@ -67,9 +70,9 @@ def get_tabs():
   )
 
 
-# Create a new tab (Owner only: username must be "the_sagor")
 @app.route("/tabs", methods=["POST"])
 def create_tab():
+  global tabs, messages
   data = request.json or {}
   username = data.get("username", "")
   tab_name = data.get("tabName", "").strip().lower()
@@ -85,15 +88,13 @@ def create_tab():
   if tab_name not in messages:
     messages[tab_name] = []
 
-  # Save to disk permanently!
-  save_data({"tabs": tabs, "messages": messages})
-
+  save_cloud_data(tabs, messages)
   return jsonify({"success": True, "tab": tabs[tab_name]})
 
 
-# Delete a tab (Owner only: username must be "the_sagor")
 @app.route("/tabs/<tab_name>", methods=["DELETE"])
 def delete_tab(tab_name):
+  global tabs, messages
   username = request.args.get("username", "")
 
   if username.lower() != "the_sagor":
@@ -107,17 +108,15 @@ def delete_tab(tab_name):
     if tab_name in messages:
       del messages[tab_name]
 
-    # Save changes to disk permanently!
-    save_data({"tabs": tabs, "messages": messages})
-
+    save_cloud_data(tabs, messages)
     return jsonify({"success": True})
 
   return jsonify({"error": "Tab not found."}), 404
 
 
-# Get messages
 @app.route("/messages", methods=["GET"])
 def get_messages():
+  global messages
   username = request.args.get("username", "")
   if username:
     active_users[username] = time.time()
@@ -143,9 +142,9 @@ def get_messages():
   return jsonify({"messages": filtered})
 
 
-# Post a message & save it permanently
 @app.route("/messages", methods=["POST"])
 def post_message():
+  global messages
   data = request.json or {}
   tab = data.get("tab", "global")
   username = data.get("username", "Unknown")
@@ -193,9 +192,7 @@ def post_message():
   if len(messages[tab]) > MAX_SAVED_MESSAGES:
     messages[tab].pop(0)
 
-  # Save messages to disk permanently!
-  save_data({"tabs": tabs, "messages": messages})
-
+  save_cloud_data(tabs, messages)
   return jsonify({"success": True, "message": new_msg})
 
 
