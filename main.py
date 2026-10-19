@@ -5,7 +5,6 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# Your JSONBin details
 BIN_ID = "6ad5e140ac6210605a3e42e3"
 MASTER_KEY = "$2a$10$UCtiBKkVUgl0HFVAffaIG.hnfbL0FDEPi.nRcfJbPbGIs2smtPOXy"
 JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{BIN_ID}"
@@ -13,6 +12,34 @@ HEADERS = {
     "Content-Type": "application/json",
     "X-Master-Key": MASTER_KEY,
 }
+
+# Bad word list to filter out
+BAD_WORDS = [
+    "fuck",
+    "shit",
+    "bitch",
+    "asshole",
+    "dick",
+    "cunt",
+    "pussy",
+    "bastard",
+    "nigger",
+    "nigga",
+    "slut",
+    "whore",
+]
+
+
+def censor_message(text):
+  words = text.split()
+  censored_words = []
+  for w in words:
+    clean_w = "".join([c for c in w if c.isalnum()]).lower()
+    if clean_w in BAD_WORDS:
+      censored_words.append("*" * len(w))
+    else:
+      censored_words.append(w)
+  return " ".join(censored_words)
 
 
 def load_cloud_data():
@@ -32,6 +59,11 @@ def load_cloud_data():
 
 def save_cloud_data(tabs_data, messages_data):
   try:
+    # Ensure strict 100-message limit per tab before saving to bin
+    for tab_name in messages_data:
+      if len(messages_data[tab_name]) > 100:
+        messages_data[tab_name] = messages_data[tab_name][-100:]
+
     payload = {"tabs": tabs_data, "messages": messages_data}
     requests.put(JSONBIN_URL, headers=HEADERS, json=payload)
   except Exception:
@@ -49,7 +81,7 @@ MAX_SAVED_MESSAGES = 100
 
 @app.route("/", methods=["GET"])
 def home():
-  return jsonify({"status": "Server is running with cloud storage!"})
+  return jsonify({"status": "Server is running smoothly!"})
 
 
 @app.route("/tabs", methods=["GET"])
@@ -114,6 +146,25 @@ def delete_tab(tab_name):
   return jsonify({"error": "Tab not found."}), 404
 
 
+# Owner endpoint to clear messages in a tab
+@app.route("/messages/clear", methods=["POST"])
+def clear_messages():
+  global messages
+  data = request.json or {}
+  username = data.get("username", "")
+  tab = data.get("tab", "global")
+
+  if username.lower() != "the_sagor":
+    return jsonify({"error": "Unauthorized. Owner only."}), 403
+
+  if tab in messages:
+    messages[tab] = []
+    save_cloud_data(tabs, messages)
+    return jsonify({"success": True})
+
+  return jsonify({"error": "Tab not found."}), 404
+
+
 @app.route("/messages", methods=["GET"])
 def get_messages():
   global messages
@@ -159,6 +210,9 @@ def post_message():
   if len(msg_text) > MESSAGE_LIMIT:
     msg_text = msg_text[:MESSAGE_LIMIT]
 
+  # Apply bad word censor
+  msg_text = censor_message(msg_text)
+
   current_time = time.time()
   if username in last_message_times:
     elapsed = current_time - last_message_times[username]
@@ -189,8 +243,9 @@ def post_message():
 
   messages[tab].append(new_msg)
 
+  # Strictly keep max 100 messages
   if len(messages[tab]) > MAX_SAVED_MESSAGES:
-    messages[tab].pop(0)
+    messages[tab] = messages[tab][-MAX_SAVED_MESSAGES:]
 
   save_cloud_data(tabs, messages)
   return jsonify({"success": True, "message": new_msg})
