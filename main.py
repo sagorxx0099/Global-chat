@@ -13,7 +13,6 @@ HEADERS = {
     "X-Master-Key": MASTER_KEY,
 }
 
-# Bad word list to filter out
 BAD_WORDS = [
     "fuck",
     "shit",
@@ -59,7 +58,6 @@ def load_cloud_data():
 
 def save_cloud_data(tabs_data, messages_data):
   try:
-    # Ensure strict 100-message limit per tab before saving to bin
     for tab_name in messages_data:
       if len(messages_data[tab_name]) > 100:
         messages_data[tab_name] = messages_data[tab_name][-100:]
@@ -72,7 +70,7 @@ def save_cloud_data(tabs_data, messages_data):
 
 tabs, messages = load_cloud_data()
 last_message_times = {}
-active_users = {}
+active_users = {}  # username -> {"timestamp": float, "gameName": str}
 
 MESSAGE_LIMIT = 200
 SLOW_MODE_COOLDOWN = 5.0
@@ -91,7 +89,9 @@ def get_tabs():
 
   current_time = time.time()
   inactive_users = [
-      u for u, t in active_users.items() if current_time - t > 20
+      u
+      for u, info in active_users.items()
+      if current_time - info.get("timestamp", 0) > 20
   ]
   for u in inactive_users:
     del active_users[u]
@@ -146,7 +146,21 @@ def delete_tab(tab_name):
   return jsonify({"error": "Tab not found."}), 404
 
 
-# Owner endpoint to clear messages in a tab
+@app.route("/profile", methods=["GET"])
+def get_profile():
+  target_user = request.args.get("username", "")
+  user_info = active_users.get(target_user, {})
+  game_name = user_info.get("gameName", "Unknown Game / Main Menu")
+  is_online = target_user in active_users
+  return jsonify(
+      {
+          "username": target_user,
+          "gameName": game_name,
+          "online": is_online,
+      }
+  )
+
+
 @app.route("/messages/clear", methods=["POST"])
 def clear_messages():
   global messages
@@ -169,8 +183,9 @@ def clear_messages():
 def get_messages():
   global messages
   username = request.args.get("username", "")
+  game_name = request.args.get("gameName", "Roblox Game")
   if username:
-    active_users[username] = time.time()
+    active_users[username] = {"timestamp": time.time(), "gameName": game_name}
 
   tab = request.args.get("tab", "global")
   if tab not in messages:
@@ -200,17 +215,17 @@ def post_message():
   tab = data.get("tab", "global")
   username = data.get("username", "Unknown")
   display_name = data.get("displayName", username)
+  game_name = data.get("gameName", "Roblox Game")
   msg_text = data.get("message", "").strip()
 
   if not msg_text:
     return jsonify({"error": "Message cannot be empty."}), 400
 
-  active_users[username] = time.time()
+  active_users[username] = {"timestamp": time.time(), "gameName": game_name}
 
   if len(msg_text) > MESSAGE_LIMIT:
     msg_text = msg_text[:MESSAGE_LIMIT]
 
-  # Apply bad word censor
   msg_text = censor_message(msg_text)
 
   current_time = time.time()
@@ -243,7 +258,6 @@ def post_message():
 
   messages[tab].append(new_msg)
 
-  # Strictly keep max 100 messages
   if len(messages[tab]) > MAX_SAVED_MESSAGES:
     messages[tab] = messages[tab][-MAX_SAVED_MESSAGES:]
 
