@@ -13,6 +13,7 @@ HEADERS = {
     "X-Master-Key": MASTER_KEY,
 }
 
+# Bad word list to filter out
 BAD_WORDS = [
     "fuck",
     "shit",
@@ -70,7 +71,9 @@ def save_cloud_data(tabs_data, messages_data):
 
 tabs, messages = load_cloud_data()
 last_message_times = {}
-active_users = {}  # username -> {"timestamp": float, "gameName": str}
+active_users = (
+    {}
+)  # Stores username -> {time, displayName, gameName} data
 
 MESSAGE_LIMIT = 200
 SLOW_MODE_COOLDOWN = 5.0
@@ -89,9 +92,7 @@ def get_tabs():
 
   current_time = time.time()
   inactive_users = [
-      u
-      for u, info in active_users.items()
-      if current_time - info.get("timestamp", 0) > 20
+      u for u, d in active_users.items() if current_time - d.get("time", 0) > 25
   ]
   for u in inactive_users:
     del active_users[u]
@@ -146,21 +147,6 @@ def delete_tab(tab_name):
   return jsonify({"error": "Tab not found."}), 404
 
 
-@app.route("/profile", methods=["GET"])
-def get_profile():
-  target_user = request.args.get("username", "")
-  user_info = active_users.get(target_user, {})
-  game_name = user_info.get("gameName", "Unknown Game / Main Menu")
-  is_online = target_user in active_users
-  return jsonify(
-      {
-          "username": target_user,
-          "gameName": game_name,
-          "online": is_online,
-      }
-  )
-
-
 @app.route("/messages/clear", methods=["POST"])
 def clear_messages():
   global messages
@@ -179,13 +165,41 @@ def clear_messages():
   return jsonify({"error": "Tab not found."}), 404
 
 
+# Profile endpoint to view player info and game detection
+@app.route("/profile/<username>", methods=["GET"])
+def get_profile(username):
+  u_key = username.lower()
+  user_data = active_users.get(u_key)
+
+  if not user_data:
+    return jsonify({
+        "username": username,
+        "displayName": username,
+        "game": "Unknown / Offline",
+        "online": False,
+    })
+
+  return jsonify({
+      "username": username,
+      "displayName": user_data.get("displayName", username),
+      "game": user_data.get("gameName", "Roblox Experience"),
+      "online": (time.time() - user_data.get("time", 0) < 30),
+  })
+
+
 @app.route("/messages", methods=["GET"])
 def get_messages():
   global messages
   username = request.args.get("username", "")
-  game_name = request.args.get("gameName", "Roblox Game")
+  display_name = request.args.get("displayName", username)
+  game_name = request.args.get("game", "Roblox Experience")
+
   if username:
-    active_users[username] = {"timestamp": time.time(), "gameName": game_name}
+    active_users[username.lower()] = {
+        "time": time.time(),
+        "displayName": display_name,
+        "gameName": game_name,
+    }
 
   tab = request.args.get("tab", "global")
   if tab not in messages:
@@ -215,13 +229,17 @@ def post_message():
   tab = data.get("tab", "global")
   username = data.get("username", "Unknown")
   display_name = data.get("displayName", username)
-  game_name = data.get("gameName", "Roblox Game")
   msg_text = data.get("message", "").strip()
+  game_name = data.get("game", "Roblox Experience")
 
   if not msg_text:
     return jsonify({"error": "Message cannot be empty."}), 400
 
-  active_users[username] = {"timestamp": time.time(), "gameName": game_name}
+  active_users[username.lower()] = {
+      "time": time.time(),
+      "displayName": display_name,
+      "gameName": game_name,
+  }
 
   if len(msg_text) > MESSAGE_LIMIT:
     msg_text = msg_text[:MESSAGE_LIMIT]
