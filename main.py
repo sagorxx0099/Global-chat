@@ -1,12 +1,43 @@
+import json
 import os
 import time
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# Permanent in-memory storage for tabs and messages
-tabs = {"global": {"name": "global", "display": "Global Lobby"}}
-messages = {"global": []}
+DATA_FILE = "chat_data.json"
+
+# Default data structure
+default_data = {
+    "tabs": {"global": {"name": "global", "display": "Global Lobby"}},
+    "messages": {"global": []},
+}
+
+
+# Load data from disk if it exists
+def load_data():
+  if os.path.exists(DATA_FILE):
+    try:
+      with open(DATA_FILE, "r") as f:
+        return json.load(f)
+    except Exception:
+      pass
+  return default_data
+
+
+# Save data to disk
+def save_data(data):
+  try:
+    with open(DATA_FILE, "w") as f:
+      json.dump(data, f)
+  except Exception:
+    pass
+
+
+db = load_data()
+tabs = db.get("tabs", default_data["tabs"])
+messages = db.get("messages", default_data["messages"])
+
 last_message_times = {}  # Tracks user slow mode cooldowns
 active_users = {}  # Tracks online presence
 
@@ -53,6 +84,10 @@ def create_tab():
   tabs[tab_name] = {"name": tab_name, "display": display_name}
   if tab_name not in messages:
     messages[tab_name] = []
+
+  # Save to disk permanently!
+  save_data({"tabs": tabs, "messages": messages})
+
   return jsonify({"success": True, "tab": tabs[tab_name]})
 
 
@@ -71,12 +106,16 @@ def delete_tab(tab_name):
     del tabs[tab_name]
     if tab_name in messages:
       del messages[tab_name]
+
+    # Save changes to disk permanently!
+    save_data({"tabs": tabs, "messages": messages})
+
     return jsonify({"success": True})
 
   return jsonify({"error": "Tab not found."}), 404
 
 
-# Get messages (Returns full history on join, or new messages after 'after')
+# Get messages
 @app.route("/messages", methods=["GET"])
 def get_messages():
   username = request.args.get("username", "")
@@ -90,8 +129,6 @@ def get_messages():
   tab_messages = messages[tab]
   after_id = request.args.get("after")
 
-  # If no 'after' ID is provided (e.g. when first joining or switching tabs),
-  # send all saved messages so history isn't lost!
   if not after_id:
     return jsonify({"messages": tab_messages})
 
@@ -106,7 +143,7 @@ def get_messages():
   return jsonify({"messages": filtered})
 
 
-# Post a message & save it permanently in history
+# Post a message & save it permanently
 @app.route("/messages", methods=["POST"])
 def post_message():
   data = request.json or {}
@@ -153,9 +190,11 @@ def post_message():
 
   messages[tab].append(new_msg)
 
-  # Keep up to MAX_SAVED_MESSAGES saved in memory so it doesn't overflow
   if len(messages[tab]) > MAX_SAVED_MESSAGES:
     messages[tab].pop(0)
+
+  # Save messages to disk permanently!
+  save_data({"tabs": tabs, "messages": messages})
 
   return jsonify({"success": True, "message": new_msg})
 
